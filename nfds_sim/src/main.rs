@@ -1,6 +1,7 @@
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::distributions::Uniform;
+use statrs::distribution::Poisson;
 
 use ndarray::{Array1, Array2};
 
@@ -101,6 +102,12 @@ fn main() -> io::Result<()> {
                 .required(false)
                 .default_value("0.0")
         )
+        .arg(
+            Arg::new("max_distances")
+            .long("max_distances")
+            .help("Maximum number of pairwise distances to calculate.")
+            .required(false).default_value("100000")
+        )
         .get_matches();
 
     // Set the argument to a variable
@@ -115,6 +122,7 @@ fn main() -> io::Result<()> {
     let rate_genes: f64 = matches.value_of_t("rate_genes").unwrap();
     let vaccine_gen: i32 = matches.value_of_t("vaccine_gen").unwrap();
     let vaccine_strength: f64 = matches.value_of_t("vaccine_strength").unwrap();
+    let max_distances: usize = matches.value_of_t("max_distances").unwrap();
 
     if n_threads < 1 {
         n_threads = 1;
@@ -131,15 +139,24 @@ fn main() -> io::Result<()> {
     // Read matrix and extract relevant arrays
     let (vaccine_types, under_nfds, presence_matrix) = read_pangenome_matrix(&matrix).unwrap();
     let mut pan_genome = Population::new(&presence_matrix, &vaccine_types, &under_nfds, nfds_weight); // pangenome alignment
+    let pop_size = pan_genome.pop_size();
+
     // Save the original population for migration source
     let original_population = presence_matrix.clone();
+
+    let range1: Vec<usize> = (0..max_distances)
+        .map(|_| rng.gen_range(0..pop_size))
+    .collect();
+    let mut range2: Vec<usize> = vec![0; max_distances];
+
+    let mut avg_acc_dist = vec![0.0; n_gen as usize];
+    let mut std_acc_dist = vec![0.0; n_gen as usize];
 
     for j in 0..n_gen {
         // 1. mutate generations
         pan_genome.mutate_alleles(rate_genes);
 
-        // Run for n_gen generations
-        // 1. Compute NFDS fitness vector
+        // 2. Compute NFDS fitness vector
         let mut fitness = pan_genome.compute_nfds_fitness();
         // Apply vaccine penalty after vaccine introduction
         if vaccine_gen >= 0 && j >= vaccine_gen {
@@ -153,68 +170,28 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
-        }
-
-        // 2. Migration: replace a fraction of individuals with random genomes
-        let pop_size = pan_genome.presence_matrix.nrows();
-        use rand_distr::{Poisson, Distribution};
-        let poisson = Poisson::new(migration * pop_size as f64).unwrap();
-        let n_migrants = poisson.sample(&mut rng).round() as usize;
-        let mut migrant_indices: Vec<usize> = (0..pop_size).collect();
-        migrant_indices.shuffle(&mut rng);
-        // For migrants, set fitness to 1.0 (neutral sampling)
-        let mut fitness_with_migration = fitness.clone();
-        for &idx in migrant_indices.iter().take(n_migrants) {
-            fitness_with_migration[idx] = 1.0;
-        }
-        // Replace genomes of migrants with random samples from the original population
-        for &idx in migrant_indices.iter().take(n_migrants) {
-            let orig_idx = rng.gen_range(0..original_population.nrows());
-            for gene in 0..pan_genome.presence_matrix.ncols() {
-                pan_genome.presence_matrix[[idx, gene]] = original_population[[orig_idx, gene]];
-            }
-        }
-
-        // 3. Wright-Fisher sampling: sample next generation with fitness+migration
-        let weights = &fitness_with_migration;
+        }        
+        
+        // 4. Wright-Fisher sampling: sample next generation with fitness+migration
+        let weights = &fitness;
         let dist = rand::distributions::WeightedIndex::new(weights).unwrap();
         let sampled_individuals: Vec<usize> = (0..pop_size).map(|_| dist.sample(&mut rng)).collect();
 
         pan_genome.next_generation(&sampled_individuals);
 
-        // mutate core genome
-        pan_genome.mutate_alleles(&n_pan_mutations, &pan_weighted_dist);
-        
-        // if at final generation, sample
-        if j == n_gen -1 {
-
-            // else calculate hamming and jaccard distances
-            let core_distances = core_genome.pairwise_distances(max_distances, &range1, &range2);
-            let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
-
-            let mut output_file = outpref.to_owned();
-            let extension: &str = ".tsv";
-            output_file.push_str(extension);
-            let mut file = File::create(output_file)?;
-
-            // Iterate through the vectors and write each pair to the file
-            for (core, acc) in core_distances.iter().zip(acc_distances.iter()) {
-                writeln!(file, "{}\t{}", core, acc);
-            }
-        }
+        // 5. Migration: replace a fraction of individuals with random genomes
+        pan_genome.migration(&mut rng, migration, &original_population);
 
         // get average distances
-        if print_dist {
-            let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
+        let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
 
-            let mut std_acc = 0.0;
-            let mut avg_acc = 0.0;
-            (std_acc, avg_acc) = standard_deviation(&acc_distances);
+        let mut std_acc = 0.0;
+        let mut avg_acc = 0.0;
+        (std_acc, avg_acc) = standard_deviation(&acc_distances);
 
-            avg_acc_dist[j as usize] = avg_acc;
+        avg_acc_dist[j as usize] = avg_acc;
 
-            std_acc_dist[j as usize] = std_acc;
-        }
+        std_acc_dist[j as usize] = std_acc;
 
         //let elapsed = now_gen.elapsed();
         if verbose {
@@ -226,26 +203,22 @@ fn main() -> io::Result<()> {
     }
 
     // print per generation distances
-    if print_dist {
-        let mut output_file = outpref.to_owned();
-        let extension: &str = "_per_gen.tsv";
-        output_file.push_str(extension);
+    let mut output_file = outpref.to_owned();
+    let extension: &str = "_per_gen.tsv";
+    output_file.push_str(extension);
 
-        let mut file = File::create(output_file)?;
+    let mut file = File::create(output_file)?;
 
-        // Iterate through the vectors and write each pair to the file
-        for (avg_acc, std_acc) in avg_acc_dist
-            .iter()
-            .zip(std_acc_dist.iter())
-            .map(|(w, x)| (w, x))
-        {
-            writeln!(file, "{}\t{}", avg_acc, std_acc);
-        }
+    // Iterate through the vectors and write each pair to the file
+    for (avg_acc, std_acc) in avg_acc_dist
+        .iter()
+        .zip(std_acc_dist.iter())
+        .map(|(w, x)| (w, x))
+    {
+        writeln!(file, "{}\t{}", avg_acc, std_acc);
     }
 
-    if print_matrices {
-        pan_genome.write(outpref);
-    }
+    pan_genome.write(outpref);
 
     //let elapsed = now.elapsed();
 

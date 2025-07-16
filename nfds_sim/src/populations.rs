@@ -23,6 +23,20 @@ use std::io;
 use crate::distances::*;
 use logsumexp::LogSumExp;
 
+fn average(numbers: &[f64]) -> f64 {
+    numbers.iter().sum::<f64>() as f64 / numbers.len() as f64
+}
+
+pub fn standard_deviation(values: &[f64]) -> (f64, f64) {
+    let mean = average(values);
+
+    let sum_of_squares: f64 = values.iter().map(|&x| (x - mean).powi(2)).sum();
+
+    let variance = sum_of_squares / (values.len() as f64);
+    (variance.sqrt(), mean)
+}
+
+
 pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array1<u8>, Array1<u8>, Array2<u8>), Box<dyn std::error::Error>>{
     let content = read_to_string(matrix).unwrap();
 
@@ -122,6 +136,37 @@ impl Population {
         }
         fitness
     }
+
+    pub fn pop_size(&self) -> usize {
+        self.presence_matrix.nrows()
+    }   
+
+    pub fn calc_gene_freq(&mut self) -> f64 {
+        // Calculate the proportion of 1s for each row
+        let proportions: Vec<f64> = self
+            .presence_matrix
+            .axis_iter(Axis(0))
+            .map(|row| {
+                let sum: usize = row.iter().map(|&x| x as usize).sum();
+                let count = row.len();
+                sum as f64 / count as f64
+            })
+            .collect();
+
+        //println!("proportions: {:?}", proportions);
+        
+        // Sum all the elements in the vector
+        let sum: f64 = proportions.iter().sum();
+
+        // Calculate the number of elements in the vector
+        let count = proportions.len();
+
+        // Calculate the average
+        let average: f64 = sum as f64 / count as f64;
+
+        average
+    }
+
     pub fn new(
         presence_matrix: &Array2<u8>,
         vaccine_types: &Array1<u8>,
@@ -147,6 +192,22 @@ impl Population {
             avg_gene_freq,
             equilibrium_freq,
             nfds_weight,
+        }
+    }
+
+    pub fn migration(&mut self, rng: &mut StdRng, migration: f64, original_population: &Array2<u8>) {
+        let pop_size = self.presence_matrix.nrows();
+        let poisson = Poisson::new(migration * pop_size as f64).unwrap();
+        let n_migrants = poisson.sample(rng).round() as usize;
+        let mut migrant_indices: Vec<usize> = (0..pop_size).collect();
+        migrant_indices.shuffle(rng);
+
+        // Replace genomes of migrants with random samples from the original population
+        for &idx in migrant_indices.iter().take(n_migrants) {
+            let orig_idx = rng.gen_range(0..original_population.nrows());
+            for gene in 0..self.presence_matrix.ncols() {
+                self.presence_matrix[[idx, gene]] = original_population[[orig_idx, gene]];
+            }
         }
     }
 
