@@ -23,6 +23,7 @@ fn main() -> io::Result<()> {
             Arg::new("matrix")
                 .long("matrix")
                 .help("Input csv file of gene presence/absence.")
+                .takes_value(true)
                 .required(true)
         )
         .arg(
@@ -66,13 +67,6 @@ fn main() -> io::Result<()> {
                 .help("Prints generation and time to completion")
                 .required(false)
                 .takes_value(false)
-        )
-        .arg(
-            Arg::new("genome_size_penalty")
-                .long("genome_size_penalty")
-                .help("Multiplier for each gene difference between avg_gene_freq and observed value. Default = 0.99")
-                .required(false)
-                .default_value("0.99")
         )
         .arg(
             Arg::new("nfds_weight")
@@ -158,7 +152,8 @@ fn main() -> io::Result<()> {
 
         // 2. Compute NFDS fitness vector
         let mut fitness = pan_genome.compute_nfds_fitness();
-        // Apply vaccine penalty after vaccine introduction
+
+        // 3. Apply vaccine penalty after vaccine introduction
         if vaccine_gen >= 0 && j >= vaccine_gen {
             // vaccine_types is a 1-row Array2<u8>, so use [0, idx] or flatten
             let vaccine_types_vec: Vec<u8> = vaccine_types.iter().cloned().collect();
@@ -182,7 +177,7 @@ fn main() -> io::Result<()> {
         // 5. Migration: replace a fraction of individuals with random genomes
         pan_genome.migration(&mut rng, migration, &original_population);
 
-        // get average distances
+        // 6. get average distances
         let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
 
         let mut std_acc = 0.0;

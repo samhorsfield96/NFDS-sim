@@ -40,12 +40,19 @@ pub fn standard_deviation(values: &[f64]) -> (f64, f64) {
 pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array1<u8>, Array1<u8>, Array2<u8>), Box<dyn std::error::Error>>{
     let content = read_to_string(matrix).unwrap();
 
+    // Detect delimiter based on file extension
+    let delimiter = if matrix.ends_with(".tsv") || matrix.ends_with(".tab") {
+        '\t'
+    } else {
+        ','
+    };
+
     // Parse whole matrix as Vec<Vec<u8>>
     let matrix: Vec<Vec<u8>> = content
         .lines()
         .map(|line| {
-            line.split('\t')
-                .map(|x| x.parse::<u8>().expect("Expected binary 0 or 1"))
+            line.split(delimiter)
+                .map(|x| x.trim_start_matches('\u{feff}').trim().parse::<u8>().expect("Expected binary 0 or 1"))
                 .collect()
         })
         .collect();
