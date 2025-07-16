@@ -110,7 +110,6 @@ impl Population {
     pub fn compute_nfds_fitness(&self) -> Vec<f64> {
         let n_genomes = self.presence_matrix.nrows();
         let n_genes = self.presence_matrix.ncols();
-        // under_nfds is a column vector: 1 if gene is under NFDS, 0 otherwise
         let under_nfds = self.under_nfds.iter().collect::<Vec<&u8>>();
         // Compute frequencies for each gene (column)
         let mut gene_freq = vec![0.0; n_genes];
@@ -121,19 +120,23 @@ impl Population {
             }
             gene_freq[j] = count / n_genomes as f64;
         }
-        // Compute fitness for each genome
-        let mut fitness = vec![0.0; n_genomes];
+        // Compute log-fitness for each genome
+        let mut log_fitness = vec![0.0; n_genomes];
         for i in 0..n_genomes {
-            let mut fit = 0.0;
+            let mut log_fit = 0.0;
             for j in 0..n_genes {
                 if *under_nfds[j] == 1 && self.presence_matrix[[i, j]] == 1 {
-                    // Apply NFDS effect: push toward equilibrium frequency
-                    fit += 1.0 - self.nfds_weight * (gene_freq[j] - self.equilibrium_freq[j]).abs();
+                    let weight = 1.0 - self.nfds_weight * (gene_freq[j] - self.equilibrium_freq[j]).abs();
+                    // Avoid log(0) by bounding weight
+                    let bounded_weight = if weight > 1e-12 { weight } else { 1e-12 };
+                    log_fit += bounded_weight.ln();
                 }
             }
-            // Add a small constant to prevent zero fitness
-            fitness[i] = fit + 1e-8;
+            log_fitness[i] = log_fit;
         }
+        // Normalize using logsumexp
+        let logsumexp_value = log_fitness.iter().ln_sum_exp();
+        let fitness: Vec<f64> = log_fitness.iter().map(|&x| (x - logsumexp_value).exp()).collect();
         fitness
     }
 
