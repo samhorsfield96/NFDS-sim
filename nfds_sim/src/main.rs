@@ -57,20 +57,39 @@ fn main() -> io::Result<()> {
         .help("Multiplier for each gene difference between avg_gene_freq and observed value. Default = 0.99")
         .required(false)
         .default_value("0.99"))
+    .arg(Arg::new("nfds_weight")
+        .long("nfds-weight")
+        .help("Strength of NFDS effect (default: 1.0)")
+        .required(false)
+        .default_value("0.2"))
+    .arg(Arg::new("migration")
+        .long("migration")
+        .help("Strength of migration effect (default: 0.01)")
+        .required(false)
+        .default_value("0.01"))
+    .arg(Arg::new("vaccine_gen")
+        .long("vaccine-gen")
+        .help("Generation at which vaccine is introduced (default: never)")
+        .required(false)
+        .default_value("-1"))
+    .arg(Arg::new("vaccine_strength")
+        .long("vaccine-strength")
+        .help("Fitness penalty for vaccine-type genomes after vaccine introduction (default: 0.0)")
+        .required(false)
+        .default_value("0.0"))
     .get_matches());
 
     // Set the argument to a variable
-    let matrix: str = matches.value_of_t("matrix").unwrap();
+    let matrix: String = matches.value_of_t("matrix").unwrap();
     let n_gen: i32 = matches.value_of_t("n_gen").unwrap();
     let outpref = matches.value_of("outpref").unwrap_or("distances");
     let mut n_threads: usize = matches.value_of_t("threads").unwrap();
     let verbose = matches.is_present("verbose");
     let seed: u64 = matches.value_of_t("seed").unwrap();
-    
-    // probability that existing 
-    let migration: u64 = matches.value_of_t("seed").unwrap();
-
-    // add vaccine strength, time at point when vaccine introduced
+    let nfds_weight: f64 = matches.value_of_t("nfds_weight").unwrap();
+    let migration: f64 = matches.value_of_t("migration").unwrap();
+    let vaccine_gen: i32 = matches.value_of_t("vaccine_gen").unwrap();
+    let vaccine_strength: f64 = matches.value_of_t("vaccine_strength").unwrap();
 
     if n_threads < 1 {
         n_threads = 1;
@@ -82,50 +101,61 @@ fn main() -> io::Result<()> {
         .build_global()
         .unwrap();
 
-    let mut pan_weights: Vec<Vec<f32>> = vec![];
-    let mut n_pan_mutations: Vec<f64> = vec![];
-    let mut selection_weights: Vec<f64> = vec![0.0; pan_size];
-
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
-    let mut pan_genome = Population::new(presence_matrix); // pangenome alignment
+    // Read matrix and extract relevant arrays
+    let (vaccine_types, under_nfds, presence_matrix) = read_pangenome_matrix(&matrix);
+    let mut pan_genome = Population::new(&presence_matrix, &vaccine_types, &under_nfds, nfds_weight); // pangenome alignment
+    // Save the original population for migration source
+    let original_population = presence_matrix.clone();
 
     for j in 0..n_gen {
         // Run for n_gen generations
-        //let now_gen = Instant::now();
-
-        // sample new individuals
-        //let sampled_individuals: Vec<usize> = (0..pop_size).map(|_| rng.gen_range(0..pop_size)).collect();
-        let mut avg_pairwise_dists = vec![1.0; pop_size];
-
-        // include competition
-        if competition == true {
-            avg_pairwise_dists = pan_genome.average_distance();
+        // 1. Compute NFDS fitness vector
+        let mut fitness = pan_genome.compute_nfds_fitness();
+        // Apply vaccine penalty after vaccine introduction
+        if vaccine_gen >= 0 && j >= vaccine_gen {
+            // vaccine_types is a 1-row Array2<u8>, so use [0, idx] or flatten
+            let vaccine_types_vec: Vec<u8> = vaccine_types.iter().cloned().collect();
+            for (idx, &is_vaccine_type) in vaccine_types_vec.iter().enumerate() {
+                if is_vaccine_type == 1 {
+                    fitness[idx] -= vaccine_strength;
+                    if fitness[idx] < 0.0 {
+                        fitness[idx] = 0.0; // Prevent negative fitness
+                    }
+                }
+            }
         }
 
-        let sampled_individuals =
-            pan_genome.sample_indices(&mut rng, avg_gene_num, avg_pairwise_dists, &selection_weights, verbose, no_control_genome_size, genome_size_penalty, competition_strength);
-        
-        core_genome.next_generation(&sampled_individuals);
-        //println!("finished copying core genome {}", j);
+        // 2. Migration: replace a fraction of individuals with random genomes
+        let pop_size = pan_genome.presence_matrix.nrows();
+        use rand_distr::{Poisson, Distribution};
+        let poisson = Poisson::new(migration * pop_size as f64).unwrap();
+        let n_migrants = poisson.sample(&mut rng).round() as usize;
+        let mut migrant_indices: Vec<usize> = (0..pop_size).collect();
+        migrant_indices.shuffle(&mut rng);
+        // For migrants, set fitness to 1.0 (neutral sampling)
+        let mut fitness_with_migration = fitness.clone();
+        for &idx in migrant_indices.iter().take(n_migrants) {
+            fitness_with_migration[idx] = 1.0;
+        }
+        // Replace genomes of migrants with random samples from the original population
+        for &idx in migrant_indices.iter().take(n_migrants) {
+            let orig_idx = rng.gen_range(0..original_population.nrows());
+            for gene in 0..pan_genome.presence_matrix.ncols() {
+                pan_genome.presence_matrix[[idx, gene]] = original_population[[orig_idx, gene]];
+            }
+        }
+
+        // 3. Wright-Fisher sampling: sample next generation with fitness+migration
+        let weights = &fitness_with_migration;
+        let dist = rand::distributions::WeightedIndex::new(weights).unwrap();
+        let sampled_individuals: Vec<usize> = (0..pop_size).map(|_| dist.sample(&mut rng)).collect();
+
         pan_genome.next_generation(&sampled_individuals);
-        //println!("finished copying pangenome {}", j);
 
         // mutate core genome
-        //println!("started {}", j);
-        core_genome.mutate_alleles(&n_core_mutations, &core_weighted_dist);
-
-        //println!("finished mutating core genome {}", j);
         pan_genome.mutate_alleles(&n_pan_mutations, &pan_weighted_dist);
-        //println!("finished mutating pangenome {}", j);
-
-        // recombine populations
-        if HR_rate > 0.0 {
-            core_genome.recombine(&n_recombinations_core, &mut rng, &core_weights);
-        }
-        if HGT_rate > 0.0 {
-            pan_genome.recombine(&n_recombinations_pan, &mut rng, &pan_weights);
-        }
         
         // if at final generation, sample
         if j == n_gen -1 {
@@ -147,21 +177,14 @@ fn main() -> io::Result<()> {
 
         // get average distances
         if print_dist {
-            let core_distances = core_genome.pairwise_distances(max_distances, &range1, &range2);
             let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
-
-            let mut std_core = 0.0;
-            let mut avg_core = 0.0;
-            (std_core, avg_core) = standard_deviation(&core_distances);
 
             let mut std_acc = 0.0;
             let mut avg_acc = 0.0;
             (std_acc, avg_acc) = standard_deviation(&acc_distances);
 
-            avg_core_dist[j as usize] = avg_core;
             avg_acc_dist[j as usize] = avg_acc;
 
-            std_core_dist[j as usize] = std_core;
             std_acc_dist[j as usize] = std_acc;
         }
 
@@ -183,19 +206,16 @@ fn main() -> io::Result<()> {
         let mut file = File::create(output_file)?;
 
         // Iterate through the vectors and write each pair to the file
-        for (avg_core, avg_acc, std_core, std_acc) in avg_core_dist
+        for (avg_acc, std_acc) in avg_acc_dist
             .iter()
-            .zip(avg_acc_dist.iter())
-            .zip(std_core_dist.iter())
             .zip(std_acc_dist.iter())
-            .map(|(((w, x), y), z)| (w, x, y, z))
+            .map(|(w, x)| (w, x))
         {
-            writeln!(file, "{}\t{}\t{}\t{}", avg_core, std_core, avg_acc, std_acc);
+            writeln!(file, "{}\t{}", avg_acc, std_acc);
         }
     }
 
     if print_matrices {
-        core_genome.write(outpref);
         pan_genome.write(outpref);
     }
 

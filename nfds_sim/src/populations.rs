@@ -86,6 +86,8 @@ pub struct Population {
     vaccine_types: Array2<u8>,
     under_nfds: Array2<u8>,
     avg_gene_freq: f64,
+    equilibrium_freq: Vec<f64>, // equilibrium frequency for each gene under NFDS
+    nfds_weight: f64,           // strength of NFDS effect
 }
 
 // stacks vector of arrays into 2D array
@@ -97,20 +99,63 @@ fn to_array2<T: Copy>(source: Vec<Array1<T>>) -> Result<Array2<T>, impl std::err
 }
 
 impl Population {
+    /// Compute per-genome fitness under NFDS: for each gene under NFDS, compute its frequency in the population.
+    /// For each genome, fitness is the sum of (1 - gene frequency) for present genes under NFDS.
+    /// Returns a fitness vector (Vec<f64>), one entry per genome (row).
+    pub fn compute_nfds_fitness(&self) -> Vec<f64> {
+        let n_genomes = self.presence_matrix.nrows();
+        let n_genes = self.presence_matrix.ncols();
+        // under_nfds is a column vector: 1 if gene is under NFDS, 0 otherwise
+        let under_nfds = self.under_nfds.iter().collect::<Vec<&u8>>();
+        // Compute frequencies for each gene (column)
+        let mut gene_freq = vec![0.0; n_genes];
+        for j in 0..n_genes {
+            let mut count = 0.0;
+            for i in 0..n_genomes {
+                count += self.presence_matrix[[i, j]] as f64;
+            }
+            gene_freq[j] = count / n_genomes as f64;
+        }
+        // Compute fitness for each genome
+        let mut fitness = vec![0.0; n_genomes];
+        for i in 0..n_genomes {
+            let mut fit = 0.0;
+            for j in 0..n_genes {
+                if *under_nfds[j] == 1 && self.presence_matrix[[i, j]] == 1 {
+                    // Apply NFDS effect: push toward equilibrium frequency
+                    fit += 1.0 - self.nfds_weight * (gene_freq[j] - self.equilibrium_freq[j]).abs();
+                }
+            }
+            // Add a small constant to prevent zero fitness
+            fitness[i] = fit + 1e-8;
+        }
+        fitness
+    }
     pub fn new(
         presence_matrix: &Array2<u8>,
         vaccine_types: &Array2<u8>,
         under_nfds: &Array2<u8>,
+        nfds_weight: f64,
     ) -> Self {
-
-        // convert vector into 2D array
         let avg_gene_freq = average_sum_per_row(presence_matrix);
-
+        let n_genomes = presence_matrix.nrows();
+        let n_genes = presence_matrix.ncols();
+        // Compute equilibrium frequency for each gene (initial frequency)
+        let mut equilibrium_freq = vec![0.0; n_genes];
+        for j in 0..n_genes {
+            let mut count = 0.0;
+            for i in 0..n_genomes {
+                count += presence_matrix[[i, j]] as f64;
+            }
+            equilibrium_freq[j] = count / n_genomes as f64;
+        }
         Self {
-            presence_matrix.clone(),
-            vaccine_types,
-            under_nfds,
+            presence_matrix: presence_matrix.clone(),
+            vaccine_types: vaccine_types.clone(),
+            under_nfds: under_nfds.clone(),
             avg_gene_freq,
+            equilibrium_freq,
+            nfds_weight,
         }
     }
 
