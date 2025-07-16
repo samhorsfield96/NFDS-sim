@@ -74,9 +74,9 @@ pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array1<u8>, Array1<u8>, Ar
     let presence_matrix: Array2<u8> = full_array.slice(s![1.., 1..]).to_owned();
 
     // --- Output ---
-    println!("Vaccine types: {:?}", vaccine_types);
-    println!("Under NFDS:    {:?}", under_nfds);
-    println!("Presence matrix:\n{:?}", presence_matrix);
+    //println!("Vaccine types: {:?}", vaccine_types);
+    //println!("Under NFDS:    {:?}", under_nfds);
+    //println!("Presence matrix:\n{:?}", presence_matrix);
 
     Ok((vaccine_types, under_nfds, presence_matrix))
 }
@@ -102,18 +102,11 @@ pub struct Population {
     nfds_weight: f64,           // strength of NFDS effect
 }
 
-// stacks vector of arrays into 2D array
-fn to_array2<T: Copy>(source: Vec<Array1<T>>) -> Result<Array2<T>, impl std::error::Error> {
-    let width = source.len();
-    let flattened: Array1<T> = source.into_iter().flat_map(|row| row.to_vec()).collect();
-    let height = flattened.len() / width;
-    flattened.into_shape((width, height))
-}
-
 impl Population {
-    /// Compute per-genome fitness under NFDS: for each gene under NFDS, compute its frequency in the population.
-    /// For each genome, fitness is the sum of (1 - gene frequency) for present genes under NFDS.
-    /// Returns a fitness vector (Vec<f64>), one entry per genome (row).
+    pub fn print_pop(&self) {
+        println!("Presence matrix:\n{:?}", self.presence_matrix);
+    }
+
     pub fn compute_nfds_fitness(&self) -> Vec<f64> {
         let n_genomes = self.presence_matrix.nrows();
         let n_genes = self.presence_matrix.ncols();
@@ -127,6 +120,7 @@ impl Population {
             }
             gene_freq[j] = count / n_genomes as f64;
         }
+        
         // Compute log-fitness for each genome
         let mut log_fitness = vec![0.0; n_genomes];
         for i in 0..n_genomes {
@@ -219,129 +213,6 @@ impl Population {
                 self.presence_matrix[[idx, gene]] = original_population[[orig_idx, gene]];
             }
         }
-    }
-
-    pub fn sample_indices(
-        &mut self,
-        rng: &mut StdRng,
-        avg_gene_num: i32,
-        avg_pairwise_dists: Vec<f64>,
-        selection_coefficients: &Vec<f64>,
-        verbose: bool,
-        no_control_genome_size: bool,
-        genome_size_penalty: f64,
-        competition_strength: f64
-    ) -> Vec<usize> {
-        // Calculate the proportion of 1s for each row
-        let num_genes: Vec<i32> = self
-            .presence_matrix
-            .axis_iter(Axis(0))
-            .map(|row| {
-                let sum: i32 = row.iter().map(|&x| x as i32).sum();
-                sum
-                //let count = row.len();
-                //sum as f64 / count as f64
-            })
-            .collect();
-
-        let mut selection_weights: Vec<f64> = vec![1.0; self.presence_matrix.nrows()];
-
-        // ensure accessory genome present
-        if self.presence_matrix.ncols() > 0 {
-            
-            // TODO generate log sum value for entire row, then do logsumexp across whole selection weights array
-            selection_weights = self
-                .presence_matrix
-                .axis_iter(Axis(0))
-                .map(|row| {
-                    let log_values: Vec<f64> = row
-                        .iter()
-                        .enumerate()
-                        .map(|(col_idx, &col_val)| (1.0 + selection_coefficients[col_idx] * col_val as f64).ln())
-                        .collect();
-
-                    let neg_inf = log_values.contains(&std::f64::NEG_INFINITY);
-
-                    //let log_mean = log_values.into_iter().map(|x| x).ln_sum_exp() - (row.len() as f64).ln();
-                    let mut log_sum = 0.0;
-                    if neg_inf == false {
-                        log_sum = log_values.iter().sum();
-                    }
-
-                    log_sum
-                })
-                .collect();
-
-            // TODO: work out why when prop_positive = 0, genome size still increases (should favour reduction in genome size)
-            let logsumexp_value = selection_weights.iter().ln_sum_exp();
-
-            //println!("logsumexp_value: {:?}", logsumexp_value);
-
-            //println!("raw_selection_weights: {:?}", selection_weights);
-
-            // Exponentiate and normalize
-            selection_weights = selection_weights.into_iter()
-                .map(|x| (x - logsumexp_value).exp()) // exp(log(w) - logsumexp)
-                .collect();
-
-            //println!("pre_norm_selection_weights: {:?}", selection_weights);
-
-            let sum_weights: f64 = selection_weights.iter().sum();
-            //println!("sum_weights: {:?}", sum_weights);
-            selection_weights = selection_weights.iter().map(|&w| if w != std::f64::NEG_INFINITY {w / sum_weights} else {0.0}).collect();
-        }
-
-        // Convert differences to weights (lower difference should have higher weight)
-        //println!("raw_weights: {:?}", selection_weights);
-        let mut weights : Vec<f64>;
-        if no_control_genome_size == false {
-            // Calculate the differences from avg_gene_freq
-            let differences: Vec<i32> = num_genes
-                .iter()
-                .map(|&n_genes| (n_genes - avg_gene_num).abs())
-                .collect();
-
-            //println!("differences: {:?}", differences);
-
-            weights = differences
-                .iter()
-                .enumerate()
-                .map(|(row_idx, &diff)| genome_size_penalty.powi(diff) * selection_weights[row_idx]) // based on https://pmc.ncbi.nlm.nih.gov/articles/instance/5320679/bin/mgen-01-38-s001.pdf
-                .collect();
-        } else {
-            weights = selection_weights.clone();
-        }
-
-        //println!("post_genome_size_weights: {:?}", weights);
-        // update weights with average pairwise distance
-        for i in 0..weights.len() {
-            let scaled_distance = avg_pairwise_dists[i] * (1.0 / competition_strength);
-            let exponent = weights[i].powf(scaled_distance);
-            weights[i] = exponent;
-        }
-
-        // println!("avg_pairwise_dists: {:?}", avg_pairwise_dists);
-        // println!("post_pairwise_weights: {:?}", weights);
-        // let mean_avg_pairwise_dists = average(&avg_pairwise_dists);
-        // println!("mean_avg_pairwise_dists: {:?}", mean_avg_pairwise_dists);
-
-        // determine whether weights is only 0s
-        let max_final_weights = weights.iter().cloned().fold(-1./0. /* -inf */, f64::max);
-
-        // account for only zeros
-        if max_final_weights == 0.0 {
-            weights = vec![1.0; self.presence_matrix.nrows()];
-        }
-
-        // Create a WeightedIndex distribution based on weights
-        let dist = WeightedIndex::new(&weights).unwrap();
-
-        // Sample rows based on the distribution
-        let sampled_indices: Vec<usize> = (0..self.presence_matrix.nrows()).map(|_| dist.sample(rng)).collect();
-
-        //println!("sampled_indices: {:?}", sampled_indices);
-
-        sampled_indices
     }
 
     pub fn next_generation(&mut self, sample: &Vec<usize>) 

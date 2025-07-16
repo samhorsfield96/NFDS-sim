@@ -148,10 +148,16 @@ fn main() -> io::Result<()> {
 
     for j in 0..n_gen {
         // 1. mutate generations
+        println!("Mutating generation {}", j + 1);
+        pan_genome.print_pop();
         pan_genome.mutate_alleles(rate_genes);
+        println!("Mutated generation {}", j + 1);
+        pan_genome.print_pop();
 
         // 2. Compute NFDS fitness vector
         let mut fitness = pan_genome.compute_nfds_fitness();
+        println!("Computed NFDS fitness vector");
+        println!("Fitness vector: {:?}", fitness);
 
         // 3. Apply vaccine penalty after vaccine introduction
         if vaccine_gen >= 0 && j >= vaccine_gen {
@@ -169,13 +175,20 @@ fn main() -> io::Result<()> {
         
         // 4. Wright-Fisher sampling: sample next generation with fitness+migration
         let weights = &fitness;
+        println!("Computed Wright-Fisher sampling");    
+        println!("Weights: {:?}", weights);
         let dist = rand::distributions::WeightedIndex::new(weights).unwrap();
         let sampled_individuals: Vec<usize> = (0..pop_size).map(|_| dist.sample(&mut rng)).collect();
+        println!("Sampled individuals: {:?}", sampled_individuals);
 
         pan_genome.next_generation(&sampled_individuals);
+        println!("Next generation");
+        pan_genome.print_pop();
 
         // 5. Migration: replace a fraction of individuals with random genomes
         pan_genome.migration(&mut rng, migration, &original_population);
+        println!("Migration");
+        pan_genome.print_pop();
 
         // 6. get average distances
         let acc_distances = pan_genome.pairwise_distances(max_distances, &range1, &range2);
