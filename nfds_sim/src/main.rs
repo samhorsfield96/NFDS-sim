@@ -28,7 +28,7 @@ fn main() -> io::Result<()> {
         .required(false)
         .default_value("100"))
     .arg(Arg::new("rate_genes")
-        .long("rate_genes1")
+        .long("rate_genes")
         .help("Average number of accessory pangenome that mutates per generation in gene. Must be >= 0.0")
         .required(false)
         .default_value("1.0"))
@@ -88,6 +88,7 @@ fn main() -> io::Result<()> {
     let seed: u64 = matches.value_of_t("seed").unwrap();
     let nfds_weight: f64 = matches.value_of_t("nfds_weight").unwrap();
     let migration: f64 = matches.value_of_t("migration").unwrap();
+    let rate_genes: f64 = matches.value_of_t("rate_genes").unwrap();
     let vaccine_gen: i32 = matches.value_of_t("vaccine_gen").unwrap();
     let vaccine_strength: f64 = matches.value_of_t("vaccine_strength").unwrap();
 
@@ -104,12 +105,15 @@ fn main() -> io::Result<()> {
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
     // Read matrix and extract relevant arrays
-    let (vaccine_types, under_nfds, presence_matrix) = read_pangenome_matrix(&matrix);
+    let (vaccine_types, under_nfds, presence_matrix) = read_pangenome_matrix(&matrix).unwrap();
     let mut pan_genome = Population::new(&presence_matrix, &vaccine_types, &under_nfds, nfds_weight); // pangenome alignment
     // Save the original population for migration source
     let original_population = presence_matrix.clone();
 
     for j in 0..n_gen {
+        // 1. mutate generations
+        pan_genome.mutate_alleles(rate_genes);
+
         // Run for n_gen generations
         // 1. Compute NFDS fitness vector
         let mut fitness = pan_genome.compute_nfds_fitness();
