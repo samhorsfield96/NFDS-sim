@@ -23,7 +23,7 @@ use std::io;
 use crate::distances::*;
 use logsumexp::LogSumExp;
 
-pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array2<u8>, Array2<u8>, Array2<u8>), Box<dyn std::error::Error>>{
+pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array1<u8>, Array1<u8>, Array2<u8>), Box<dyn std::error::Error>>{
     let content = read_to_string(matrix).unwrap();
 
     // Parse whole matrix as Vec<Vec<u8>>
@@ -44,10 +44,10 @@ pub fn read_pangenome_matrix(matrix: &str) -> Result<(Array2<u8>, Array2<u8>, Ar
     let full_array = Array2::from_shape_vec((nrows, ncols), flat)?;
 
     // --- Extract vaccine types (row 0, skip column 0) ---
-    let vaccine_types: Array2<u8> = full_array.slice(s![0, 1..]).to_owned();
+    let vaccine_types: Array1<u8> = full_array.slice(s![0, 1..]).to_owned();
 
     // --- Extract NFDS (column 0, skip row 0) ---
-    let under_nfds: Array2<u8> = full_array.slice(s![1.., 0]).to_owned();
+    let under_nfds: Array1<u8> = full_array.slice(s![1.., 0]).to_owned();
 
     // --- Extract presence matrix (skip row 0 and column 0) ---
     let presence_matrix: Array2<u8> = full_array.slice(s![1.., 1..]).to_owned();
@@ -74,8 +74,8 @@ fn average_sum_per_row(matrix: &Array2<u8>) -> f64 {
 
 pub struct Population {
     presence_matrix: Array2<u8>,
-    vaccine_types: Array2<u8>,
-    under_nfds: Array2<u8>,
+    vaccine_types: Array1<u8>,
+    under_nfds: Array1<u8>,
     avg_gene_freq: f64,
     equilibrium_freq: Vec<f64>, // equilibrium frequency for each gene under NFDS
     nfds_weight: f64,           // strength of NFDS effect
@@ -124,8 +124,8 @@ impl Population {
     }
     pub fn new(
         presence_matrix: &Array2<u8>,
-        vaccine_types: &Array2<u8>,
-        under_nfds: &Array2<u8>,
+        vaccine_types: &Array1<u8>,
+        under_nfds: &Array1<u8>,
         nfds_weight: f64,
     ) -> Self {
         let avg_gene_freq = average_sum_per_row(presence_matrix);
@@ -145,6 +145,8 @@ impl Population {
             vaccine_types: vaccine_types.clone(),
             under_nfds: under_nfds.clone(),
             avg_gene_freq,
+            equilibrium_freq,
+            nfds_weight,
         }
     }
 
@@ -243,7 +245,7 @@ impl Population {
         // update weights with average pairwise distance
         for i in 0..weights.len() {
             let scaled_distance = avg_pairwise_dists[i] * (1.0 / competition_strength);
-            let exponent = safe_pow(weights[i], scaled_distance);
+            let exponent = weights[i].powf(scaled_distance);
             weights[i] = exponent;
         }
 
@@ -315,17 +317,10 @@ impl Population {
                 // iterate for number of mutations required to reach mutation rate
                 for _ in 0..n_sites {
                     // sample new site to mutate
-                    let mutant_site = thread_rng().gen_range(0..row.len());
+                    let mutant_site = thread_rng.gen_range(0..row.len());
 
-                    // get possible values to mutate to, must be different from current value
-                    let value = row[mutant_site];
-                    let values = &self.core_vec[1 >> value];
-
-                    // sample new allele
-                    let new_allele = values.iter().choose_multiple(&mut thread_rng, 1)[0];
-
-                    // set value in place
-                    row[mutant_site] = *new_allele;
+                    // Flip the value (binary: 0 <-> 1)
+                    row[mutant_site] = 1 - row[mutant_site];
                 }
             });
     }
@@ -365,8 +360,8 @@ impl Population {
                 // println!("intersection_test: {:?} intersection: {:?}", intersection_test, intersection);
                 // println!("union_test: {:?} union: {:?}", union_test, union);
                 _final_distance = 1.0
-                    - ((intersection as f64 + self.core_genes as f64)
-                        / (union as f64 + self.core_genes as f64));
+                    - ((intersection as f64)
+                        / (union as f64));
             
                 //println!("_final_distance: {:?}", _final_distance);
                 _final_distance
@@ -387,8 +382,7 @@ impl Population {
 
         // Iterate rows and write
         for row in self.presence_matrix.outer_iter() {
-            let mut line: Vec<String> = vec![1_u8.to_string(); self.core_genes];
-            line.extend(row.iter().map(|&x| x.to_string()));
+            let line: Vec<String> = row.iter().map(|&x| x.to_string()).collect();
             writeln!(file, "{}", line.join(","))?;
         }
         Ok(())
